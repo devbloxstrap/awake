@@ -1,0 +1,27 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Upload Awake.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: Awake-win-x64
+          path: build/Release/Awake.exe
+          if-no-files-found: error

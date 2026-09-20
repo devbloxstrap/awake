@@ -4,6 +4,7 @@
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
+#include <gdiplus.h>
 #include <string>
 #include <cwchar>
 #include <cwctype>
@@ -78,6 +79,7 @@ bool g_hoverScreen = false;
 bool g_hoverMode = false;
 bool g_trackingMouse = false;
 UINT g_taskbarCreated = 0;
+ULONG_PTR g_gdiplusToken = 0;
 
 COLORREF kBackgroundTop = RGB(241, 246, 252);
 COLORREF kBackgroundBottom = RGB(230, 239, 249);
@@ -91,6 +93,85 @@ COLORREF kAccent = RGB(0, 120, 212);
 COLORREF kAccentHover = RGB(0, 104, 184);
 COLORREF kAccentSoft = RGB(226, 240, 253);
 COLORREF kDisabled = RGB(160, 169, 181);
+
+Gdiplus::Color ToGpColor(COLORREF color, BYTE alpha = 255)
+{
+    return Gdiplus::Color(alpha, GetRValue(color), GetGValue(color), GetBValue(color));
+}
+
+void AddRoundedRectPath(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& rect, Gdiplus::REAL radius)
+{
+    const Gdiplus::REAL maxRadius = std::min(rect.Width, rect.Height) / 2.0f;
+    radius = std::max(0.0f, std::min(radius, maxRadius));
+    const Gdiplus::REAL diameter = radius * 2.0f;
+    if (diameter <= 0.0f) {
+        path.AddRectangle(rect);
+        return;
+    }
+
+    path.AddArc(rect.X, rect.Y, diameter, diameter, 180.0f, 90.0f);
+    path.AddArc(rect.GetRight() - diameter, rect.Y, diameter, diameter, 270.0f, 90.0f);
+    path.AddArc(rect.GetRight() - diameter, rect.GetBottom() - diameter, diameter, diameter, 0.0f, 90.0f);
+    path.AddArc(rect.X, rect.GetBottom() - diameter, diameter, diameter, 90.0f, 90.0f);
+    path.CloseFigure();
+}
+
+void DrawRoundedBoxAA(HDC dc, const RECT& r, Gdiplus::REAL radius, COLORREF fill,
+                      COLORREF border, Gdiplus::REAL borderWidth = 1.0f)
+{
+    Gdiplus::Graphics graphics(dc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+
+    const Gdiplus::RectF rect(static_cast<Gdiplus::REAL>(r.left) + 0.5f,
+                              static_cast<Gdiplus::REAL>(r.top) + 0.5f,
+                              static_cast<Gdiplus::REAL>(std::max(1L, r.right - r.left)) - 1.0f,
+                              static_cast<Gdiplus::REAL>(std::max(1L, r.bottom - r.top)) - 1.0f);
+    Gdiplus::GraphicsPath path;
+    AddRoundedRectPath(path, rect, radius);
+    Gdiplus::SolidBrush brush(ToGpColor(fill));
+    graphics.FillPath(&brush, &path);
+
+    if (borderWidth > 0.0f) {
+        Gdiplus::Pen pen(ToGpColor(border), borderWidth);
+        pen.SetAlignment(Gdiplus::PenAlignmentInset);
+        graphics.DrawPath(&pen, &path);
+    }
+}
+
+void DrawEllipseAA(HDC dc, const RECT& r, COLORREF fill, COLORREF border, Gdiplus::REAL borderWidth = 0.0f)
+{
+    Gdiplus::Graphics graphics(dc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    const Gdiplus::RectF rect(static_cast<Gdiplus::REAL>(r.left) + 0.5f,
+                              static_cast<Gdiplus::REAL>(r.top) + 0.5f,
+                              static_cast<Gdiplus::REAL>(std::max(1L, r.right - r.left)) - 1.0f,
+                              static_cast<Gdiplus::REAL>(std::max(1L, r.bottom - r.top)) - 1.0f);
+    Gdiplus::SolidBrush brush(ToGpColor(fill));
+    graphics.FillEllipse(&brush, rect);
+    if (borderWidth > 0.0f) {
+        Gdiplus::Pen pen(ToGpColor(border), borderWidth);
+        pen.SetAlignment(Gdiplus::PenAlignmentInset);
+        graphics.DrawEllipse(&pen, rect);
+    }
+}
+
+void EnableBestDpiAwareness()
+{
+    using SetProcessDpiAwarenessContextFn = BOOL(WINAPI*)(HANDLE);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32) {
+        auto setContext = reinterpret_cast<SetProcessDpiAwarenessContextFn>(
+            GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+        if (setContext) {
+            // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4.
+            if (setContext(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4)))) return;
+        }
+    }
+    SetProcessDPIAware();
+}
 
 RECT MakeRect(int left, int top, int right, int bottom)
 {
@@ -119,66 +200,54 @@ void DrawSoftBackground(HDC dc, const RECT& r)
     }
 
     // Subtle Fluent-style ambient glows. They are deliberately low contrast so text remains legible.
-    HBRUSH glow1 = CreateSolidBrush(RGB(225, 240, 255));
-    HBRUSH glow2 = CreateSolidBrush(RGB(236, 232, 252));
-    HGDIOBJ oldBrush = SelectObject(dc, glow1);
-    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
-    Ellipse(dc, r.right - 310, -120, r.right + 120, 245);
-    SelectObject(dc, glow2);
-    Ellipse(dc, -150, r.bottom - 250, 300, r.bottom + 120);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(glow1);
-    DeleteObject(glow2);
+    DrawEllipseAA(dc, MakeRect(r.right - 310, -120, r.right + 120, 245), RGB(225, 240, 255), RGB(225, 240, 255));
+    DrawEllipseAA(dc, MakeRect(-150, r.bottom - 250, 300, r.bottom + 120), RGB(236, 232, 252), RGB(236, 232, 252));
 }
 
 void DrawGlassCard(HDC dc, const RECT& r, bool strong = false)
 {
-    // Layered soft shadow + cool translucent-looking fill. In Win11 the window also requests Mica.
     RECT shadow = r;
     OffsetRect(&shadow, 0, 3);
-    HBRUSH shadowBrush = CreateSolidBrush(kShadow);
-    HPEN noPen = static_cast<HPEN>(GetStockObject(NULL_PEN));
-    HGDIOBJ oldBrush = SelectObject(dc, shadowBrush);
-    HGDIOBJ oldPen = SelectObject(dc, noPen);
-    RoundRect(dc, shadow.left, shadow.top, shadow.right, shadow.bottom, 18, 18);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(shadowBrush);
-
-    HBRUSH brush = CreateSolidBrush(strong ? kGlassStrong : kGlass);
-    HPEN pen = CreatePen(PS_SOLID, 1, kGlassBorder);
-    oldBrush = SelectObject(dc, brush);
-    oldPen = SelectObject(dc, pen);
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, 18, 18);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(brush);
-    DeleteObject(pen);
+    DrawRoundedBoxAA(dc, shadow, 9.0f, kShadow, kShadow, 0.0f);
+    DrawRoundedBoxAA(dc, r, 9.0f, strong ? kGlassStrong : kGlass, kGlassBorder, 1.0f);
 }
 
 void DrawPill(HDC dc, const RECT& r, COLORREF fill, COLORREF border)
 {
-    HBRUSH brush = CreateSolidBrush(fill);
-    HPEN pen = CreatePen(PS_SOLID, 1, border);
-    HGDIOBJ oldBrush = SelectObject(dc, brush);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    const int radius = r.bottom - r.top;
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(brush);
-    DeleteObject(pen);
+    const Gdiplus::REAL radius = static_cast<Gdiplus::REAL>(std::max(1L, r.bottom - r.top)) / 2.0f;
+    DrawRoundedBoxAA(dc, r, radius, fill, border, 1.0f);
 }
 
 void DrawTextLine(HDC dc, const std::wstring& text, RECT r, HFONT font, COLORREF color,
                   UINT format = DT_LEFT | DT_VCENTER | DT_SINGLELINE)
 {
-    HGDIOBJ oldFont = SelectObject(dc, font);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, color);
-    DrawTextW(dc, text.c_str(), -1, &r, format);
-    SelectObject(dc, oldFont);
+    LOGFONTW logFont{};
+    if (!font || GetObjectW(font, sizeof(logFont), &logFont) == 0) return;
+
+    Gdiplus::Graphics graphics(dc);
+    graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+    graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+
+    Gdiplus::Font gpFont(dc, &logFont);
+    Gdiplus::SolidBrush brush(ToGpColor(color));
+    Gdiplus::StringFormat stringFormat;
+    stringFormat.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap | Gdiplus::StringFormatFlagsNoClip);
+    stringFormat.SetTrimming(Gdiplus::StringTrimmingNone);
+
+    if (format & DT_CENTER) stringFormat.SetAlignment(Gdiplus::StringAlignmentCenter);
+    else if (format & DT_RIGHT) stringFormat.SetAlignment(Gdiplus::StringAlignmentFar);
+    else stringFormat.SetAlignment(Gdiplus::StringAlignmentNear);
+
+    stringFormat.SetLineAlignment((format & DT_VCENTER)
+        ? Gdiplus::StringAlignmentCenter
+        : Gdiplus::StringAlignmentNear);
+
+    const Gdiplus::RectF layout(static_cast<Gdiplus::REAL>(r.left),
+                                static_cast<Gdiplus::REAL>(r.top),
+                                static_cast<Gdiplus::REAL>(std::max(1L, r.right - r.left)),
+                                static_cast<Gdiplus::REAL>(std::max(1L, r.bottom - r.top)));
+    graphics.DrawString(text.c_str(), -1, &gpFont, layout, &stringFormat, &brush);
 }
 
 void DrawToggle(HDC dc, const RECT& r, bool on, bool enabled, bool hovered = false)
@@ -190,29 +259,15 @@ void DrawToggle(HDC dc, const RECT& r, bool on, bool enabled, bool hovered = fal
                                 : on ? trackFill
                                      : (hovered ? RGB(126, 157, 190) : RGB(151, 162, 176));
 
-    HBRUSH brush = CreateSolidBrush(trackFill);
-    HPEN pen = CreatePen(PS_SOLID, 1, trackBorder);
-    HGDIOBJ oldBrush = SelectObject(dc, brush);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    const int radius = r.bottom - r.top;
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(brush);
-    DeleteObject(pen);
+    const Gdiplus::REAL radius = static_cast<Gdiplus::REAL>(std::max(1L, r.bottom - r.top)) / 2.0f;
+    DrawRoundedBoxAA(dc, r, radius, trackFill, trackBorder, 1.0f);
 
     const int diameter = (r.bottom - r.top) - 6;
     const int x = on ? r.right - diameter - 3 : r.left + 3;
     RECT knob{x, r.top + 3, x + diameter, r.top + 3 + diameter};
-    HBRUSH knobBrush = CreateSolidBrush(enabled ? RGB(255, 255, 255) : RGB(245, 247, 249));
-    HPEN knobPen = CreatePen(PS_SOLID, 1, enabled ? RGB(202, 210, 220) : RGB(218, 223, 229));
-    oldBrush = SelectObject(dc, knobBrush);
-    oldPen = SelectObject(dc, knobPen);
-    Ellipse(dc, knob.left, knob.top, knob.right, knob.bottom);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(knobBrush);
-    DeleteObject(knobPen);
+    DrawEllipseAA(dc, knob,
+                  enabled ? RGB(255, 255, 255) : RGB(245, 247, 249),
+                  enabled ? RGB(202, 210, 220) : RGB(218, 223, 229), 1.0f);
 }
 
 std::wstring ModeDisplayText(Mode mode)
@@ -228,30 +283,25 @@ std::wstring ModeDisplayText(Mode mode)
 
 void DrawModeSelector(HDC dc, const RECT& r, bool enabled, bool hovered)
 {
+    FillSolid(dc, r, kGlass);
     const COLORREF fill = !enabled ? RGB(242, 245, 248) : (hovered ? RGB(241, 248, 254) : RGB(255, 255, 255));
     const COLORREF border = !enabled ? RGB(217, 224, 232) : (hovered ? RGB(121, 166, 207) : RGB(198, 211, 225));
-    HBRUSH brush = CreateSolidBrush(fill);
-    HPEN pen = CreatePen(PS_SOLID, 1, border);
-    HGDIOBJ oldBrush = SelectObject(dc, brush);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, 12, 12);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(brush);
-    DeleteObject(pen);
+    DrawRoundedBoxAA(dc, r, 7.0f, fill, border, 1.0f);
 
     DrawTextLine(dc, ModeDisplayText(g_mode), MakeRect(r.left + 16, r.top, r.right - 42, r.bottom),
                  g_fontBody, enabled ? kText : kDisabled);
 
-    HPEN chevronPen = CreatePen(PS_SOLID, 2, enabled ? kMuted : kDisabled);
-    oldPen = SelectObject(dc, chevronPen);
-    const int cx = r.right - 21;
-    const int cy = (r.top + r.bottom) / 2;
-    MoveToEx(dc, cx - 4, cy - 2, nullptr);
-    LineTo(dc, cx, cy + 2);
-    LineTo(dc, cx + 4, cy - 2);
-    SelectObject(dc, oldPen);
-    DeleteObject(chevronPen);
+    Gdiplus::Graphics graphics(dc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::Pen pen(ToGpColor(enabled ? kMuted : kDisabled), 1.6f);
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
+    const Gdiplus::REAL cx = static_cast<Gdiplus::REAL>(r.right - 21);
+    const Gdiplus::REAL cy = static_cast<Gdiplus::REAL>((r.top + r.bottom) / 2);
+    Gdiplus::PointF points[3]{{cx - 4.0f, cy - 2.0f}, {cx, cy + 2.0f}, {cx + 4.0f, cy - 2.0f}};
+    graphics.DrawLines(&pen, points, 3);
 }
 
 bool ReadDword(HKEY key, const wchar_t* name, DWORD& value)
@@ -688,13 +738,9 @@ void DrawStatusPill(HDC dc, int left, int top, const std::wstring& text)
     DrawPill(dc, pill, g_enabled ? RGB(239, 248, 255) : RGB(244, 246, 249),
              g_enabled ? RGB(187, 217, 242) : RGB(215, 222, 230));
 
-    HBRUSH dotBrush = CreateSolidBrush(g_enabled ? RGB(34, 153, 84) : RGB(145, 154, 166));
-    HGDIOBJ oldBrush = SelectObject(dc, dotBrush);
-    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
-    Ellipse(dc, left + 12, top + 10, left + 22, top + 20);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(dotBrush);
+    DrawEllipseAA(dc, MakeRect(left + 12, top + 10, left + 22, top + 20),
+                  g_enabled ? RGB(34, 153, 84) : RGB(145, 154, 166),
+                  g_enabled ? RGB(34, 153, 84) : RGB(145, 154, 166));
     DrawTextLine(dc, text, MakeRect(left + 30, top, left + width - 12, top + 30), g_fontSmall, kMuted);
 }
 
@@ -931,15 +977,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 const bool pressed = (dis->itemState & ODS_SELECTED) != 0;
                 RECT r = dis->rcItem;
                 const COLORREF fill = pressed ? kAccentHover : kAccent;
-                HBRUSH brush = CreateSolidBrush(fill);
-                HPEN pen = CreatePen(PS_SOLID, 1, fill);
-                HGDIOBJ oldBrush = SelectObject(dis->hDC, brush);
-                HGDIOBJ oldPen = SelectObject(dis->hDC, pen);
-                RoundRect(dis->hDC, r.left, r.top, r.right, r.bottom, 12, 12);
-                SelectObject(dis->hDC, oldBrush);
-                SelectObject(dis->hDC, oldPen);
-                DeleteObject(brush);
-                DeleteObject(pen);
+                FillSolid(dis->hDC, r, kGlass);
+                DrawRoundedBoxAA(dis->hDC, r, 7.0f, fill, fill, 1.0f);
                 DrawTextLine(dis->hDC, L"Apply", r, g_fontBody, RGB(255, 255, 255),
                              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 return TRUE;
@@ -1167,7 +1206,7 @@ void CreateChildControls(HWND hwnd, HINSTANCE instance)
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 {
-    SetProcessDPIAware();
+    EnableBestDpiAwareness();
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_DATE_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&controls);
 
@@ -1206,6 +1245,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     }
     EnsureModeTimer();
 
+    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+    if (Gdiplus::GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, nullptr) != Gdiplus::Ok) {
+        ReleaseMutex(mutex);
+        CloseHandle(mutex);
+        return 4;
+    }
+
     g_appIcon = static_cast<HICON>(LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE));
     CreateFonts();
     g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
@@ -1221,6 +1267,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     wc.hbrBackground = nullptr;
     if (!RegisterClassExW(&wc)) {
         DeleteFonts();
+        if (g_gdiplusToken) Gdiplus::GdiplusShutdown(g_gdiplusToken);
         ReleaseMutex(mutex);
         CloseHandle(mutex);
         return 2;
@@ -1232,6 +1279,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
         nullptr, nullptr, hInstance, nullptr);
     if (!g_hwnd) {
         DeleteFonts();
+        if (g_gdiplusToken) Gdiplus::GdiplusShutdown(g_gdiplusToken);
         ReleaseMutex(mutex);
         CloseHandle(mutex);
         return 3;
@@ -1258,6 +1306,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 
     DeleteFonts();
     if (g_appIcon) DestroyIcon(g_appIcon);
+    if (g_gdiplusToken) Gdiplus::GdiplusShutdown(g_gdiplusToken);
     ReleaseMutex(mutex);
     CloseHandle(mutex);
     return static_cast<int>(msg.wParam);

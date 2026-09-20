@@ -2,6 +2,9 @@
 
 ## 2.0.0
 
+- Improved UI rendering with anti-aliased rounded controls and ClearType-quality text.
+- Added per-monitor-v2 DPI awareness fallback for sharper rendering at Windows display scaling.
+
 - Refined the settings UI with a compact Fluent-inspired glass layout and Windows 11 Mica backdrop.
 - Replaced the classic mode combo box with a modern custom selector.
 - Added hover feedback, status pill, cleaner spacing, and dynamic compact window sizing.

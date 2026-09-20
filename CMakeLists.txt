@@ -13,7 +13,7 @@ add_executable(Awake WIN32
 
 target_compile_features(Awake PRIVATE cxx_std_17)
 target_compile_definitions(Awake PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(Awake PRIVATE shell32 user32 kernel32 gdi32 comctl32 advapi32 dwmapi uxtheme)
+target_link_libraries(Awake PRIVATE shell32 user32 kernel32 gdi32 gdiplus comctl32 advapi32 dwmapi uxtheme)
 
 if(MSVC)
   target_compile_options(Awake PRIVATE /W4 /permissive- /EHsc)

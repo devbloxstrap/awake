@@ -2,6 +2,8 @@
 #include <windowsx.h>
 #include <shellapi.h>
 #include <commctrl.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
 #include <string>
 #include <cwchar>
 #include <cwctype>
@@ -49,7 +51,7 @@ enum class Mode : DWORD {
 };
 
 HWND g_hwnd = nullptr;
-HWND g_hMode = nullptr;
+HWND g_hMode = nullptr; // retained for compatibility; v2 glass UI uses a custom selector
 HWND g_hHours = nullptr;
 HWND g_hMinutes = nullptr;
 HWND g_hDate = nullptr;
@@ -70,16 +72,25 @@ ULONGLONG g_expireTick = 0;
 SYSTEMTIME g_expirationLocal{};
 RECT g_enableToggleRect{};
 RECT g_screenToggleRect{};
+RECT g_modeSelectorRect{};
+bool g_hoverEnable = false;
+bool g_hoverScreen = false;
+bool g_hoverMode = false;
+bool g_trackingMouse = false;
 UINT g_taskbarCreated = 0;
 
-COLORREF kBackground = RGB(247, 249, 252);
-COLORREF kSidebar = RGB(242, 246, 250);
-COLORREF kCard = RGB(255, 255, 255);
-COLORREF kBorder = RGB(218, 224, 232);
-COLORREF kText = RGB(30, 35, 44);
-COLORREF kMuted = RGB(105, 113, 126);
+COLORREF kBackgroundTop = RGB(241, 246, 252);
+COLORREF kBackgroundBottom = RGB(230, 239, 249);
+COLORREF kGlass = RGB(250, 252, 255);
+COLORREF kGlassStrong = RGB(255, 255, 255);
+COLORREF kGlassBorder = RGB(205, 216, 229);
+COLORREF kShadow = RGB(205, 216, 228);
+COLORREF kText = RGB(24, 33, 47);
+COLORREF kMuted = RGB(92, 104, 122);
 COLORREF kAccent = RGB(0, 120, 212);
-COLORREF kDisabled = RGB(170, 176, 186);
+COLORREF kAccentHover = RGB(0, 104, 184);
+COLORREF kAccentSoft = RGB(226, 240, 253);
+COLORREF kDisabled = RGB(160, 169, 181);
 
 RECT MakeRect(int left, int top, int right, int bottom)
 {
@@ -94,13 +105,66 @@ void FillSolid(HDC dc, const RECT& r, COLORREF color)
     DeleteObject(brush);
 }
 
-void DrawRoundedCard(HDC dc, const RECT& r)
+void DrawSoftBackground(HDC dc, const RECT& r)
 {
-    HBRUSH brush = CreateSolidBrush(kCard);
-    HPEN pen = CreatePen(PS_SOLID, 1, kBorder);
+    const int height = std::max(1L, r.bottom - r.top);
+    const int bands = 40;
+    for (int i = 0; i < bands; ++i) {
+        const double t = static_cast<double>(i) / static_cast<double>(bands - 1);
+        const int rr = static_cast<int>(GetRValue(kBackgroundTop) * (1.0 - t) + GetRValue(kBackgroundBottom) * t);
+        const int gg = static_cast<int>(GetGValue(kBackgroundTop) * (1.0 - t) + GetGValue(kBackgroundBottom) * t);
+        const int bb = static_cast<int>(GetBValue(kBackgroundTop) * (1.0 - t) + GetBValue(kBackgroundBottom) * t);
+        RECT band{r.left, r.top + (height * i) / bands, r.right, r.top + (height * (i + 1)) / bands + 1};
+        FillSolid(dc, band, RGB(rr, gg, bb));
+    }
+
+    // Subtle Fluent-style ambient glows. They are deliberately low contrast so text remains legible.
+    HBRUSH glow1 = CreateSolidBrush(RGB(225, 240, 255));
+    HBRUSH glow2 = CreateSolidBrush(RGB(236, 232, 252));
+    HGDIOBJ oldBrush = SelectObject(dc, glow1);
+    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+    Ellipse(dc, r.right - 310, -120, r.right + 120, 245);
+    SelectObject(dc, glow2);
+    Ellipse(dc, -150, r.bottom - 250, 300, r.bottom + 120);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(glow1);
+    DeleteObject(glow2);
+}
+
+void DrawGlassCard(HDC dc, const RECT& r, bool strong = false)
+{
+    // Layered soft shadow + cool translucent-looking fill. In Win11 the window also requests Mica.
+    RECT shadow = r;
+    OffsetRect(&shadow, 0, 3);
+    HBRUSH shadowBrush = CreateSolidBrush(kShadow);
+    HPEN noPen = static_cast<HPEN>(GetStockObject(NULL_PEN));
+    HGDIOBJ oldBrush = SelectObject(dc, shadowBrush);
+    HGDIOBJ oldPen = SelectObject(dc, noPen);
+    RoundRect(dc, shadow.left, shadow.top, shadow.right, shadow.bottom, 18, 18);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(shadowBrush);
+
+    HBRUSH brush = CreateSolidBrush(strong ? kGlassStrong : kGlass);
+    HPEN pen = CreatePen(PS_SOLID, 1, kGlassBorder);
+    oldBrush = SelectObject(dc, brush);
+    oldPen = SelectObject(dc, pen);
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, 18, 18);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+}
+
+void DrawPill(HDC dc, const RECT& r, COLORREF fill, COLORREF border)
+{
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
     HGDIOBJ oldBrush = SelectObject(dc, brush);
     HGDIOBJ oldPen = SelectObject(dc, pen);
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, 12, 12);
+    const int radius = r.bottom - r.top;
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
     SelectObject(dc, oldBrush);
     SelectObject(dc, oldPen);
     DeleteObject(brush);
@@ -117,15 +181,14 @@ void DrawTextLine(HDC dc, const std::wstring& text, RECT r, HFONT font, COLORREF
     SelectObject(dc, oldFont);
 }
 
-void DrawToggle(HDC dc, const RECT& r, bool on, bool enabled)
+void DrawToggle(HDC dc, const RECT& r, bool on, bool enabled, bool hovered = false)
 {
-    // Compact Windows-style switch with a subtle outline in the off state.
-    const COLORREF trackFill = !enabled ? RGB(224, 228, 234)
-                              : on ? kAccent
-                                   : RGB(244, 246, 249);
-    const COLORREF trackBorder = !enabled ? RGB(201, 206, 214)
-                                : on ? kAccent
-                                     : RGB(145, 153, 165);
+    const COLORREF trackFill = !enabled ? RGB(224, 229, 236)
+                              : on ? (hovered ? kAccentHover : kAccent)
+                                   : (hovered ? RGB(235, 242, 249) : RGB(244, 247, 250));
+    const COLORREF trackBorder = !enabled ? RGB(202, 210, 220)
+                                : on ? trackFill
+                                     : (hovered ? RGB(126, 157, 190) : RGB(151, 162, 176));
 
     HBRUSH brush = CreateSolidBrush(trackFill);
     HPEN pen = CreatePen(PS_SOLID, 1, trackBorder);
@@ -141,10 +204,8 @@ void DrawToggle(HDC dc, const RECT& r, bool on, bool enabled)
     const int diameter = (r.bottom - r.top) - 6;
     const int x = on ? r.right - diameter - 3 : r.left + 3;
     RECT knob{x, r.top + 3, x + diameter, r.top + 3 + diameter};
-    const COLORREF knobFill = enabled ? RGB(255, 255, 255) : RGB(246, 247, 249);
-    const COLORREF knobBorder = enabled ? RGB(205, 210, 217) : RGB(218, 222, 227);
-    HBRUSH knobBrush = CreateSolidBrush(knobFill);
-    HPEN knobPen = CreatePen(PS_SOLID, 1, knobBorder);
+    HBRUSH knobBrush = CreateSolidBrush(enabled ? RGB(255, 255, 255) : RGB(245, 247, 249));
+    HPEN knobPen = CreatePen(PS_SOLID, 1, enabled ? RGB(202, 210, 220) : RGB(218, 223, 229));
     oldBrush = SelectObject(dc, knobBrush);
     oldPen = SelectObject(dc, knobPen);
     Ellipse(dc, knob.left, knob.top, knob.right, knob.bottom);
@@ -152,6 +213,45 @@ void DrawToggle(HDC dc, const RECT& r, bool on, bool enabled)
     SelectObject(dc, oldPen);
     DeleteObject(knobBrush);
     DeleteObject(knobPen);
+}
+
+std::wstring ModeDisplayText(Mode mode)
+{
+    switch (mode) {
+        case Mode::Passive: return L"Selected power plan";
+        case Mode::Indefinite: return L"Awake indefinitely";
+        case Mode::Timed: return L"Time interval";
+        case Mode::Expiration: return L"Until expiration";
+    }
+    return L"Selected power plan";
+}
+
+void DrawModeSelector(HDC dc, const RECT& r, bool enabled, bool hovered)
+{
+    const COLORREF fill = !enabled ? RGB(242, 245, 248) : (hovered ? RGB(241, 248, 254) : RGB(255, 255, 255));
+    const COLORREF border = !enabled ? RGB(217, 224, 232) : (hovered ? RGB(121, 166, 207) : RGB(198, 211, 225));
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ oldBrush = SelectObject(dc, brush);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, 12, 12);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+
+    DrawTextLine(dc, ModeDisplayText(g_mode), MakeRect(r.left + 16, r.top, r.right - 42, r.bottom),
+                 g_fontBody, enabled ? kText : kDisabled);
+
+    HPEN chevronPen = CreatePen(PS_SOLID, 2, enabled ? kMuted : kDisabled);
+    oldPen = SelectObject(dc, chevronPen);
+    const int cx = r.right - 21;
+    const int cy = (r.top + r.bottom) / 2;
+    MoveToEx(dc, cx - 4, cy - 2, nullptr);
+    LineTo(dc, cx, cy + 2);
+    LineTo(dc, cx + 4, cy - 2);
+    SelectObject(dc, oldPen);
+    DeleteObject(chevronPen);
 }
 
 bool ReadDword(HKEY key, const wchar_t* name, DWORD& value)
@@ -451,29 +551,40 @@ void ApplyEditorValues()
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
+void AdjustWindowHeight()
+{
+    if (!g_hwnd) return;
+    const bool hasDetails = g_enabled && (g_mode == Mode::Timed || g_mode == Mode::Expiration);
+    const int desiredHeight = hasDetails ? 690 : 610;
+    RECT wr{};
+    if (GetWindowRect(g_hwnd, &wr)) {
+        const int width = wr.right - wr.left;
+        const int currentHeight = wr.bottom - wr.top;
+        if (currentHeight != desiredHeight) {
+            SetWindowPos(g_hwnd, nullptr, 0, 0, width, desiredHeight,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
 void PositionControls()
 {
     RECT client{};
     GetClientRect(g_hwnd, &client);
-    const int contentLeft = 48;
-    const int right = client.right - 48;
-    const int comboWidth = 360;
-    const int comboX = std::max(contentLeft + 420, right - comboWidth - 18);
-    SetWindowPos(g_hMode, nullptr, comboX, 326, comboWidth, 220, SWP_NOZORDER);
+    const int contentLeft = 40;
+    const int right = client.right - 40;
 
-    SetWindowPos(g_hHours, nullptr, contentLeft + 330, 518, 90, 30, SWP_NOZORDER);
-    SetWindowPos(g_hMinutes, nullptr, contentLeft + 485, 518, 90, 30, SWP_NOZORDER);
-    SetWindowPos(g_hDate, nullptr, contentLeft + 275, 518, 180, 30, SWP_NOZORDER);
-    SetWindowPos(g_hTime, nullptr, contentLeft + 475, 518, 135, 30, SWP_NOZORDER);
-    SetWindowPos(g_hApply, nullptr, right - 96, 516, 78, 32, SWP_NOZORDER);
+    SetWindowPos(g_hMode, nullptr, right - 360, 301, 342, 40, SWP_NOZORDER);
+    SetWindowPos(g_hHours, nullptr, contentLeft + 315, 487, 92, 34, SWP_NOZORDER);
+    SetWindowPos(g_hMinutes, nullptr, contentLeft + 455, 487, 92, 34, SWP_NOZORDER);
+    SetWindowPos(g_hDate, nullptr, contentLeft + 270, 487, 178, 34, SWP_NOZORDER);
+    SetWindowPos(g_hTime, nullptr, contentLeft + 468, 487, 132, 34, SWP_NOZORDER);
+    SetWindowPos(g_hApply, nullptr, right - 92, 486, 78, 36, SWP_NOZORDER);
 }
 
 void UpdateControls()
 {
-    if (!g_hMode) return;
-    SendMessageW(g_hMode, CB_SETCURSEL, static_cast<WPARAM>(g_mode), 0);
-    EnableWindow(g_hMode, g_enabled ? TRUE : FALSE);
-
+    if (g_hMode) EnableWindow(g_hMode, g_enabled ? TRUE : FALSE);
     const bool timed = g_enabled && g_mode == Mode::Timed;
     const bool expiration = g_enabled && g_mode == Mode::Expiration;
     ShowWindow(g_hHours, timed ? SW_SHOW : SW_HIDE);
@@ -482,6 +593,9 @@ void UpdateControls()
     ShowWindow(g_hTime, expiration ? SW_SHOW : SW_HIDE);
     ShowWindow(g_hApply, (timed || expiration) ? SW_SHOW : SW_HIDE);
     SyncTextFields();
+    AdjustWindowHeight();
+    PositionControls();
+    InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
 void ShowMainWindow()
@@ -518,77 +632,154 @@ void ShowTrayMenu(HWND hwnd)
     DestroyMenu(menu);
 }
 
+void ApplyModernWindowVisuals(HWND hwnd)
+{
+    // Windows 11: rounded corners + Mica base. Unsupported attributes fail harmlessly on Windows 10.
+    const DWORD DWMWA_WINDOW_CORNER_PREFERENCE_ID = 33;
+    const DWORD DWMWA_BORDER_COLOR_ID = 34;
+    const DWORD DWMWA_CAPTION_COLOR_ID = 35;
+    const DWORD DWMWA_TEXT_COLOR_ID = 36;
+    const DWORD DWMWA_SYSTEMBACKDROP_TYPE_ID = 38;
+    const int DWMWCP_ROUND = 2;
+    const int DWMSBT_MAINWINDOW = 2;
+    const COLORREF border = RGB(204, 216, 229);
+    const COLORREF caption = RGB(242, 247, 252);
+    const COLORREF captionText = kText;
+
+    DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE_ID, &DWMWCP_ROUND, sizeof(DWMWCP_ROUND));
+    DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE_ID, &DWMSBT_MAINWINDOW, sizeof(DWMSBT_MAINWINDOW));
+    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR_ID, &border, sizeof(border));
+    DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR_ID, &caption, sizeof(caption));
+    DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR_ID, &captionText, sizeof(captionText));
+}
+
+void ShowModeMenu(HWND hwnd)
+{
+    if (!g_enabled) return;
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+
+    AppendMenuW(menu, MF_STRING | (g_mode == Mode::Passive ? MF_CHECKED : 0), 1, L"Selected power plan");
+    AppendMenuW(menu, MF_STRING | (g_mode == Mode::Indefinite ? MF_CHECKED : 0), 2, L"Awake indefinitely");
+    AppendMenuW(menu, MF_STRING | (g_mode == Mode::Timed ? MF_CHECKED : 0), 3, L"Time interval");
+    AppendMenuW(menu, MF_STRING | (g_mode == Mode::Expiration ? MF_CHECKED : 0), 4, L"Until expiration");
+
+    RECT modeRect{};
+    GetWindowRect(g_hMode, &modeRect);
+    POINT pt{modeRect.left, modeRect.bottom + 4};
+    SetForegroundWindow(hwnd);
+    const UINT selected = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+                                         pt.x, pt.y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+    if (selected >= 1 && selected <= 4) {
+        SetMode(static_cast<Mode>(selected - 1));
+        UpdateControls();
+    }
+}
+
+void DrawStatusPill(HDC dc, int left, int top, const std::wstring& text)
+{
+    SIZE size{};
+    HGDIOBJ oldFont = SelectObject(dc, g_fontSmall);
+    GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &size);
+    SelectObject(dc, oldFont);
+    const int width = std::min(360, std::max(160, static_cast<int>(size.cx) + 52));
+    RECT pill{left, top, left + width, top + 30};
+    DrawPill(dc, pill, g_enabled ? RGB(239, 248, 255) : RGB(244, 246, 249),
+             g_enabled ? RGB(187, 217, 242) : RGB(215, 222, 230));
+
+    HBRUSH dotBrush = CreateSolidBrush(g_enabled ? RGB(34, 153, 84) : RGB(145, 154, 166));
+    HGDIOBJ oldBrush = SelectObject(dc, dotBrush);
+    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+    Ellipse(dc, left + 12, top + 10, left + 22, top + 20);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(dotBrush);
+    DrawTextLine(dc, text, MakeRect(left + 30, top, left + width - 12, top + 30), g_fontSmall, kMuted);
+}
+
 void DrawInterface(HWND hwnd, HDC dc)
 {
     RECT client{};
     GetClientRect(hwnd, &client);
-    FillSolid(dc, client, kBackground);
+    DrawSoftBackground(dc, client);
 
-    // Simple single-page header. Non-functional navigation items were removed.
-    RECT header{0, 0, client.right, 78};
-    FillSolid(dc, header, RGB(255, 255, 255));
-    HPEN separator = CreatePen(PS_SOLID, 1, kBorder);
+    // Header sits directly on the material layer; cards provide the content hierarchy.
+    RECT header{0, 0, client.right, 72};
+    FillSolid(dc, header, RGB(247, 250, 253));
+    HPEN separator = CreatePen(PS_SOLID, 1, RGB(214, 224, 234));
     HGDIOBJ oldPen = SelectObject(dc, separator);
-    MoveToEx(dc, 0, 77, nullptr);
-    LineTo(dc, client.right, 77);
+    MoveToEx(dc, 0, 71, nullptr);
+    LineTo(dc, client.right, 71);
     SelectObject(dc, oldPen);
     DeleteObject(separator);
 
-    if (g_appIcon) DrawIconEx(dc, 38, 22, g_appIcon, 34, 34, 0, nullptr, DI_NORMAL);
-    DrawTextLine(dc, L"Awake", MakeRect(86, 14, 250, 62), g_fontSection, kText);
-    DrawTextLine(dc, L"v2.0.0", MakeRect(client.right - 130, 18, client.right - 42, 58), g_fontSmall, kMuted,
-                 DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    if (g_appIcon) DrawIconEx(dc, 34, 18, g_appIcon, 34, 34, 0, nullptr, DI_NORMAL);
+    DrawTextLine(dc, L"Awake", MakeRect(80, 10, 250, 60), g_fontSection, kText);
 
-    const int left = 48;
-    const int right = client.right - 48;
-    DrawTextLine(dc, L"Awake", MakeRect(left, 96, right, 142), g_fontTitle, kText);
-    DrawTextLine(dc, L"Keep your PC awake when you need it.", MakeRect(left, 140, right, 170), g_fontBody, kMuted);
+    RECT versionPill{client.right - 112, 20, client.right - 32, 50};
+    DrawPill(dc, versionPill, RGB(239, 245, 251), RGB(211, 222, 233));
+    DrawTextLine(dc, L"v2.0.0", versionPill, g_fontSmall, kMuted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    RECT activation{left, 182, right, 258};
-    DrawRoundedCard(dc, activation);
-    if (g_appIcon) DrawIconEx(dc, left + 22, 201, g_appIcon, 36, 36, 0, nullptr, DI_NORMAL);
-    DrawTextLine(dc, L"Awake", MakeRect(left + 74, 192, left + 245, 246), g_fontSection, kText);
-    DrawTextLine(dc, g_enabled ? L"On" : L"Off", MakeRect(right - 150, 192, right - 78, 246),
+    const int left = 40;
+    const int right = client.right - 40;
+    DrawTextLine(dc, L"Awake", MakeRect(left, 88, right, 130), g_fontTitle, kText);
+    DrawTextLine(dc, L"Keep your PC awake when you need it.", MakeRect(left, 126, right, 154), g_fontBody, kMuted);
+
+    RECT activation{left, 164, right, 234};
+    DrawGlassCard(dc, activation, true);
+    RECT iconTile{left + 18, 179, left + 58, 219};
+    DrawPill(dc, iconTile, kAccentSoft, RGB(194, 220, 244));
+    if (g_appIcon) DrawIconEx(dc, left + 24, 185, g_appIcon, 28, 28, 0, nullptr, DI_NORMAL);
+    DrawTextLine(dc, L"Awake", MakeRect(left + 74, 171, left + 270, 202), g_fontSection, kText);
+    DrawTextLine(dc, L"Override sleep behavior without changing your power plan.",
+                 MakeRect(left + 74, 198, left + 535, 226), g_fontSmall, kMuted);
+    DrawTextLine(dc, g_enabled ? L"On" : L"Off", MakeRect(right - 142, 170, right - 76, 226),
                  g_fontBody, g_enabled ? kText : kMuted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-    g_enableToggleRect = MakeRect(right - 62, 206, right - 14, 234);
-    DrawToggle(dc, g_enableToggleRect, g_enabled, true);
+    g_enableToggleRect = MakeRect(right - 60, 185, right - 12, 213);
+    DrawToggle(dc, g_enableToggleRect, g_enabled, true, g_hoverEnable);
 
-    DrawTextLine(dc, L"Behavior", MakeRect(left, 274, right, 310), g_fontSection, kText);
+    DrawTextLine(dc, L"Behavior", MakeRect(left, 248, right, 280), g_fontSection, kText);
 
-    RECT modeCard{left, 310, right, 386};
-    DrawRoundedCard(dc, modeCard);
-    DrawTextLine(dc, L"Mode", MakeRect(left + 28, 316, left + 220, 350), g_fontBody, g_enabled ? kText : kDisabled);
-    DrawTextLine(dc, L"Choose how Awake should keep your device active", MakeRect(left + 28, 346, left + 500, 374),
+    RECT modeCard{left, 286, right, 356};
+    DrawGlassCard(dc, modeCard);
+    DrawTextLine(dc, L"Mode", MakeRect(left + 24, 294, left + 235, 326), g_fontBody, g_enabled ? kText : kDisabled);
+    DrawTextLine(dc, L"Choose how Awake should keep your device active", MakeRect(left + 24, 323, left + 475, 348),
                  g_fontSmall, g_enabled ? kMuted : kDisabled);
+    g_modeSelectorRect = MakeRect(right - 360, 301, right - 18, 341);
 
-    RECT screenCard{left, 398, right, 474};
-    DrawRoundedCard(dc, screenCard);
+    RECT screenCard{left, 368, right, 438};
+    DrawGlassCard(dc, screenCard);
     const bool screenEnabled = g_enabled && g_mode != Mode::Passive;
-    DrawTextLine(dc, L"Keep screen on", MakeRect(left + 28, 404, left + 300, 438), g_fontBody,
+    DrawTextLine(dc, L"Keep screen on", MakeRect(left + 24, 376, left + 300, 408), g_fontBody,
                  screenEnabled ? kText : kDisabled);
-    DrawTextLine(dc, L"Prevent the display from turning off while Awake is active", MakeRect(left + 28, 434, left + 520, 462),
-                 g_fontSmall, screenEnabled ? kMuted : kDisabled);
-    g_screenToggleRect = MakeRect(right - 62, 422, right - 14, 450);
-    DrawToggle(dc, g_screenToggleRect, g_keepDisplayOn, screenEnabled);
+    DrawTextLine(dc, L"Prevent the display from turning off while Awake is active",
+                 MakeRect(left + 24, 405, left + 520, 430), g_fontSmall, screenEnabled ? kMuted : kDisabled);
+    g_screenToggleRect = MakeRect(right - 60, 389, right - 12, 417);
+    DrawToggle(dc, g_screenToggleRect, g_keepDisplayOn, screenEnabled, g_hoverScreen);
 
-    if (g_enabled && (g_mode == Mode::Timed || g_mode == Mode::Expiration)) {
-        RECT detail{left, 486, right, 568};
-        DrawRoundedCard(dc, detail);
+    const bool hasDetails = g_enabled && (g_mode == Mode::Timed || g_mode == Mode::Expiration);
+    if (hasDetails) {
+        RECT detail{left, 450, right, 536};
+        DrawGlassCard(dc, detail);
         if (g_mode == Mode::Timed) {
-            DrawTextLine(dc, L"Duration", MakeRect(left + 28, 494, left + 200, 524), g_fontBody, kText);
-            DrawTextLine(dc, L"Hours", MakeRect(left + 330, 488, left + 420, 516), g_fontSmall, kMuted);
-            DrawTextLine(dc, L"Minutes", MakeRect(left + 485, 488, left + 575, 516), g_fontSmall, kMuted);
+            DrawTextLine(dc, L"Duration", MakeRect(left + 24, 458, left + 200, 490), g_fontBody, kText);
+            DrawTextLine(dc, L"Hours", MakeRect(left + 315, 458, left + 407, 484), g_fontSmall, kMuted);
+            DrawTextLine(dc, L"Minutes", MakeRect(left + 455, 458, left + 547, 484), g_fontSmall, kMuted);
         } else {
-            DrawTextLine(dc, L"Expiration", MakeRect(left + 28, 494, left + 200, 524), g_fontBody, kText);
-            DrawTextLine(dc, L"Date", MakeRect(left + 275, 488, left + 455, 516), g_fontSmall, kMuted);
-            DrawTextLine(dc, L"Time", MakeRect(left + 475, 488, left + 610, 516), g_fontSmall, kMuted);
+            DrawTextLine(dc, L"Expiration", MakeRect(left + 24, 458, left + 200, 490), g_fontBody, kText);
+            DrawTextLine(dc, L"Date", MakeRect(left + 270, 458, left + 448, 484), g_fontSmall, kMuted);
+            DrawTextLine(dc, L"Time", MakeRect(left + 468, 458, left + 600, 484), g_fontSmall, kMuted);
         }
     }
 
-    std::wstring status = L"Status: " + StatusText().substr(8);
-    DrawTextLine(dc, status, MakeRect(left, 590, right, 620), g_fontSmall, kMuted);
-    DrawTextLine(dc, L"Settings are saved automatically. Closing this window keeps Awake running in the tray.",
-                 MakeRect(left, 620, right, 650), g_fontSmall, kMuted);
+    const int statusTop = hasDetails ? 552 : 464;
+    const int noteTop = hasDetails ? 588 : 500;
+    std::wstring shortStatus = StatusText();
+    if (shortStatus.rfind(L"Awake - ", 0) == 0) shortStatus = shortStatus.substr(8);
+    DrawStatusPill(dc, left, statusTop, shortStatus);
+    DrawTextLine(dc, L"Settings save automatically. Closing this window keeps Awake running in the tray.",
+                 MakeRect(left, noteTop, right, noteTop + 28), g_fontSmall, kMuted);
 }
 
 void HandleExpiration()
@@ -657,6 +848,46 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_ERASEBKGND:
             return 1;
 
+        case WM_MOUSEMOVE: {
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            const bool screenEnabled = g_enabled && g_mode != Mode::Passive;
+            const bool newEnable = PtInRect(&g_enableToggleRect, pt) != FALSE;
+            const bool newScreen = screenEnabled && PtInRect(&g_screenToggleRect, pt) != FALSE;
+            if (newEnable != g_hoverEnable || newScreen != g_hoverScreen) {
+                g_hoverEnable = newEnable;
+                g_hoverScreen = newScreen;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            if (!g_trackingMouse) {
+                TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
+                TrackMouseEvent(&tme);
+                g_trackingMouse = true;
+            }
+            return 0;
+        }
+
+        case WM_MOUSELEAVE:
+            g_trackingMouse = false;
+            if (g_hoverEnable || g_hoverMode || g_hoverScreen) {
+                g_hoverEnable = g_hoverMode = g_hoverScreen = false;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+
+        case WM_SETCURSOR:
+            if (LOWORD(lParam) == HTCLIENT) {
+                POINT pt{};
+                GetCursorPos(&pt);
+                ScreenToClient(hwnd, &pt);
+                const bool screenEnabled = g_enabled && g_mode != Mode::Passive;
+                if (PtInRect(&g_enableToggleRect, pt) ||
+                    (screenEnabled && PtInRect(&g_screenToggleRect, pt))) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+            }
+            break;
+
         case WM_LBUTTONUP: {
             POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             if (PtInRect(&g_enableToggleRect, pt)) {
@@ -684,15 +915,43 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             return 0;
 
+        case WM_DRAWITEM: {
+            DRAWITEMSTRUCT* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+            if (dis && dis->CtlID == IDC_MODE) {
+                const bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+                DrawModeSelector(dis->hDC, dis->rcItem, g_enabled, pressed);
+                if ((dis->itemState & ODS_FOCUS) != 0) {
+                    RECT focus = dis->rcItem;
+                    InflateRect(&focus, -3, -3);
+                    DrawFocusRect(dis->hDC, &focus);
+                }
+                return TRUE;
+            }
+            if (dis && dis->CtlID == IDC_APPLY) {
+                const bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+                RECT r = dis->rcItem;
+                const COLORREF fill = pressed ? kAccentHover : kAccent;
+                HBRUSH brush = CreateSolidBrush(fill);
+                HPEN pen = CreatePen(PS_SOLID, 1, fill);
+                HGDIOBJ oldBrush = SelectObject(dis->hDC, brush);
+                HGDIOBJ oldPen = SelectObject(dis->hDC, pen);
+                RoundRect(dis->hDC, r.left, r.top, r.right, r.bottom, 12, 12);
+                SelectObject(dis->hDC, oldBrush);
+                SelectObject(dis->hDC, oldPen);
+                DeleteObject(brush);
+                DeleteObject(pen);
+                DrawTextLine(dis->hDC, L"Apply", r, g_fontBody, RGB(255, 255, 255),
+                             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return TRUE;
+            }
+            break;
+        }
+
         case WM_COMMAND: {
             const UINT id = LOWORD(wParam);
             const UINT code = HIWORD(wParam);
-            if (id == IDC_MODE && code == CBN_SELCHANGE) {
-                int index = static_cast<int>(SendMessageW(g_hMode, CB_GETCURSEL, 0, 0));
-                if (index >= 0 && index <= static_cast<int>(Mode::Expiration)) {
-                    SetMode(static_cast<Mode>(index));
-                    UpdateControls();
-                }
+            if (id == IDC_MODE && code == BN_CLICKED) {
+                ShowModeMenu(hwnd);
                 return 0;
             }
             if (id == IDC_APPLY && code == BN_CLICKED) {
@@ -848,18 +1107,18 @@ void ShowHelp()
 
 void CreateFonts()
 {
-    g_fontTitle = CreateFontW(-34, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    g_fontTitle = CreateFontW(-32, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Display");
     g_fontSection = CreateFontW(-19, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                               DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    g_fontBody = CreateFontW(-17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                               DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
+    g_fontBody = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
     g_fontSmall = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
 }
 
 void DeleteFonts()
@@ -872,13 +1131,9 @@ void DeleteFonts()
 
 void CreateChildControls(HWND hwnd, HINSTANCE instance)
 {
-    g_hMode = CreateWindowExW(0, WC_COMBOBOXW, nullptr,
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+    g_hMode = CreateWindowExW(0, L"BUTTON", L"",
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
         0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MODE)), instance, nullptr);
-    SendMessageW(g_hMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Keep using the selected power plan"));
-    SendMessageW(g_hMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Keep awake indefinitely"));
-    SendMessageW(g_hMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Keep awake for a time interval"));
-    SendMessageW(g_hMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Keep awake until expiration"));
 
     g_hHours = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"1",
         WS_CHILD | ES_NUMBER | ES_CENTER | WS_TABSTOP,
@@ -897,11 +1152,12 @@ void CreateChildControls(HWND hwnd, HINSTANCE instance)
         0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EXPIRY_TIME)), instance, nullptr);
 
     g_hApply = CreateWindowExW(0, L"BUTTON", L"Apply",
-        WS_CHILD | BS_PUSHBUTTON | WS_TABSTOP,
+        WS_CHILD | BS_OWNERDRAW | WS_TABSTOP,
         0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_APPLY)), instance, nullptr);
 
     for (HWND control : {g_hMode, g_hHours, g_hMinutes, g_hDate, g_hTime, g_hApply}) {
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g_fontBody), TRUE);
+        SetWindowTheme(control, L"Explorer", nullptr);
     }
     PositionControls();
     UpdateControls();
@@ -962,7 +1218,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     wc.hIcon = g_appIcon ? g_appIcon : LoadIconW(nullptr, IDI_APPLICATION);
     wc.hIconSm = g_appIcon ? g_appIcon : LoadIconW(nullptr, IDI_APPLICATION);
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.hbrBackground = nullptr;
     if (!RegisterClassExW(&wc)) {
         DeleteFonts();
         ReleaseMutex(mutex);
@@ -972,7 +1228,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 
     g_hwnd = CreateWindowExW(0, kWindowClass, L"Awake 2.0",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 980, 700,
+        CW_USEDEFAULT, CW_USEDEFAULT, 940, 610,
         nullptr, nullptr, hInstance, nullptr);
     if (!g_hwnd) {
         DeleteFonts();
@@ -981,6 +1237,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
         return 3;
     }
 
+    ApplyModernWindowVisuals(g_hwnd);
     CreateChildControls(g_hwnd, hInstance);
     AddTrayIcon();
     ApplyExecutionState();

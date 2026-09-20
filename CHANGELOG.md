@@ -2,8 +2,9 @@
 
 ## 2.0.0
 
-- Fixed MSVC duplicate-manifest build failure.
-- Removed duplicate UNICODE macro definitions.
+- Refined the settings UI with a compact Fluent-inspired glass layout and Windows 11 Mica backdrop.
+- Replaced the classic mode combo box with a modern custom selector.
+- Added hover feedback, status pill, cleaner spacing, and dynamic compact window sizing.
 
 - Simplified the settings UI to a focused single-page layout and removed inactive General, Appearance, and About navigation items.
 - Replaced the blurry single-resolution icon with a crisp multi-resolution Awake icon for window, taskbar, and tray use.

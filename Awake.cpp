@@ -1,6 +1,3 @@
-#define UNICODE
-#define _UNICODE
-
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
@@ -13,6 +10,10 @@
 #include <limits>
 
 #include "resource.h"
+
+#ifdef _MSC_VER
+#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#endif
 
 namespace {
 constexpr wchar_t kWindowClass[] = L"AwakeStandaloneWindowV2";

@@ -2,6 +2,9 @@
 
 ## 2.0.0
 
+- Fixed MSVC duplicate-manifest build failure.
+- Removed duplicate UNICODE macro definitions.
+
 - Simplified the settings UI to a focused single-page layout and removed inactive General, Appearance, and About navigation items.
 - Replaced the blurry single-resolution icon with a crisp multi-resolution Awake icon for window, taskbar, and tray use.
 - Refined On/Off switches with a cleaner compact Windows-style design.

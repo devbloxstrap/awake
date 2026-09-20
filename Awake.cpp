@@ -4,6 +4,7 @@
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
+#include <objidl.h>
 #include <gdiplus.h>
 #include <string>
 #include <cwchar>

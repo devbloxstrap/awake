@@ -1,25 +1,38 @@
-# Awake
+# Awake 2.0
 
 A lightweight standalone Windows utility that keeps your PC awake without installing the full PowerToys suite.
 
-Awake runs as a small native Windows tray application. It does not require PowerToys, the PowerToys Runner, Settings UI, telemetry libraries, or shared PowerToys DLLs.
+Version 2.0 adds a proper Windows settings interface while keeping the low-overhead native tray application design.
 
-## Features
+## What's new in 2.0
 
-- Keep the PC awake indefinitely
-- Optional **keep display on** mode
-- 30 minute, 1 hour, and 2 hour tray presets
-- Command-line time limits
-- System tray controls
-- Single-instance protection
-- Native Windows executable with no separate runtime dependency
+- New light settings window inspired by the familiar Awake workflow
+- Main **Awake On/Off** switch
+- Four behavior modes:
+  - Keep using the selected power plan
+  - Keep awake indefinitely
+  - Keep awake for a time interval
+  - Keep awake until an expiration date/time
+- **Keep screen on** option
+- Persistent settings under the current Windows user
+- Live remaining-time status
+- Tray quick actions and Open Awake command
+- Single-instance behavior now brings the existing window forward
+- Embedded application/tray icon
+- File and product version metadata set to **2.0.0**
+- `--minimized` startup option
 
-## Usage
+## Tray controls
 
-Run `Awake.exe`. With no arguments, Awake keeps the system awake indefinitely and places an icon in the notification area.
+Right-click the tray icon for quick access to Off, selected power plan, indefinite mode, 30-minute / 1-hour / 2-hour presets, Keep screen on, and Exit.
+
+Left-click the tray icon to open the settings window. Closing the settings window hides it to the tray; use **Exit** from the tray menu to terminate Awake.
+
+## Command line
 
 ```text
 Awake.exe
+Awake.exe --minimized
 Awake.exe --display-on true
 Awake.exe --time-limit 3600
 Awake.exe --time-limit 3600 --display-on true
@@ -35,9 +48,9 @@ Requirements:
 
 - Windows 10 or Windows 11
 - Visual Studio 2022 Build Tools with **Desktop development with C++**
-- CMake
+- CMake 3.20+
 
-From an x64 Native Tools Command Prompt for Visual Studio 2022:
+From an x64 Native Tools Command Prompt:
 
 ```bat
 build-msvc.bat
@@ -58,15 +71,15 @@ build\Release\Awake.exe
 
 ## GitHub Actions
 
-Every push to `main` runs the Windows build workflow. The compiled `Awake.exe` is uploaded as the `Awake-win-x64` workflow artifact.
+Pushes to `main`, pull requests, and manual runs build the Windows x64 application and upload a packaged `Awake-v2.0.0-win-x64.zip` artifact.
 
 ## How it works
 
-Awake uses the documented Windows `SetThreadExecutionState` API. While active it requests `ES_SYSTEM_REQUIRED | ES_CONTINUOUS`. When **keep display on** is enabled, it also requests `ES_DISPLAY_REQUIRED`. Returning to Off mode resets the execution state with `ES_CONTINUOUS`.
+Awake uses the documented Windows `SetThreadExecutionState` API. Active keep-awake modes request `ES_SYSTEM_REQUIRED | ES_CONTINUOUS`; when **Keep screen on** is enabled, `ES_DISPLAY_REQUIRED` is also requested. Returning to Off or selected-power-plan mode releases the request with `ES_CONTINUOUS`.
 
 ## Relationship to Microsoft PowerToys
 
-This repository is an independent, brand-neutral standalone implementation inspired by the functionality of Microsoft PowerToys Awake. It does not use Microsoft or PowerToys branding, logos, icons, telemetry, Settings UI, or shared PowerToys components.
+This repository is an independent standalone implementation inspired by the functionality and interaction model of Microsoft PowerToys Awake. It does not require PowerToys, the PowerToys Runner, telemetry libraries, the PowerToys Settings application, or shared PowerToys DLLs.
 
 Microsoft PowerToys is an open-source Microsoft project. This repository is not affiliated with or endorsed by Microsoft.
 
